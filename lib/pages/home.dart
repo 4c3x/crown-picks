@@ -1,4 +1,5 @@
-import 'package:diasorahub_admin/shared/widgets/uploadcard.dart';
+import 'package:diasorahub_admin/shared/widgets/cards.dart';
+import 'package:go_router/go_router.dart';
 import 'package:flutter/material.dart';
 
 class HomePage extends StatefulWidget {
@@ -28,21 +29,30 @@ class _HomePageState extends State<HomePage> {
               children: [
                     UploadCard(
                     title: 'Upload RealEstate',
-                    icon: Icons.home,),
+                    icon: Icons.home,
+                    onTap: () => context.go('/upload_estate'),
+                    ),
+                    
                     Spacer(),
                     UploadCard(
                       title: 'View RealEstate',
-                      icon: Icons.home,),
+                      icon: Icons.home,
+                      onTap: () => context.go('/view_estate')
+                    ),
                   ],
                 ),
             Row(children: [
               UploadCard(
                 title: 'Upload Doctors',
-                icon: Icons.medical_services,),
+                icon: Icons.medical_services,
+                onTap: () => context.go('/upload_doctors'),
+                ),
                 Spacer(),
               UploadCard(
                 title: 'View Doctors',
-                icon:Icons.medical_services,),
+                icon:Icons.medical_services,
+                onTap: () => context.go('/view_doctors'),
+              ),
             ],)
           ],
         ),

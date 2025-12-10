@@ -7,6 +7,9 @@ class CustomTextField extends StatelessWidget {
   final TextInputType keyboardType;
   final bool obscure;
 
+  /// Optional suffix widget, commonly used for visibility toggle buttons
+  final Widget? suffixIcon;
+
   /// Optional styling
   final double height; // total height of the field
   final double borderRadius;
@@ -20,6 +23,7 @@ class CustomTextField extends StatelessWidget {
     required this.icon,
     this.keyboardType = TextInputType.text,
     this.obscure = false,
+    this.suffixIcon,
     this.height = 56.0,
     this.borderRadius = 12.0,
     this.fillColor,
@@ -44,6 +48,8 @@ class CustomTextField extends StatelessWidget {
             padding: const EdgeInsets.only(left: 12.0, right: 8.0),
             child: Icon(icon, size: 20),
           ),
+          // optional suffix (e.g. visibility toggle)
+          suffixIcon: suffixIcon,
           prefixIconConstraints: const BoxConstraints(minWidth: 44, minHeight: 44),
           isDense: true,
           contentPadding: contentPadding ?? const EdgeInsets.symmetric(vertical: 14.0, horizontal: 12.0),

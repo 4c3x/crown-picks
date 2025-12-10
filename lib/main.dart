@@ -1,8 +1,14 @@
-import 'package:diasorahub_admin/pages/home.dart';
 import 'package:diasorahub_admin/routing/app_router.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-void main() {
+void main() async{
+    WidgetsFlutterBinding.ensureInitialized();
+    await Supabase.initialize(
+    url: 'SUPABASE_URL',
+    anonKey: 'SUPABASE_ANON_KEY',
+    );
+    
   runApp(const MainApp());
 }
 
@@ -14,6 +20,6 @@ class MainApp extends StatelessWidget {
     return  MaterialApp.router(
       routerConfig: appRouter,
       debugShowCheckedModeBanner: false,
-      );
+    );
   }
 }

@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   go_router: ^17.0.0
   file_picker: ^5.0.1
+  supabase_flutter: ^2.10.3
+  flutter_dotenv: ^6.0.0
 
 dev_dependencies:
   flutter_test:

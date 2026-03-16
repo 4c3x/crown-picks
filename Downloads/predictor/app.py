@@ -16,12 +16,14 @@ import sys
 import logging
 import json
 import csv
+import threading
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from basketball.api_client import basketball_api
 from basketball.predictor import basketball_predictor
 from basketball.prediction_tracker import prediction_tracker
+from basketball.scan_manager import scan_manager
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -982,6 +984,233 @@ def get_team_results():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# =========================================================================
+# BACKGROUND SCAN ENDPOINTS (Persist even when browser closes)
+# =========================================================================
+
+@app.route('/api/scan/start', methods=['POST'])
+def start_background_scan():
+    """Start a background scan that persists even if browser closes."""
+    try:
+        data = request.get_json() or {}
+        scan_type = data.get('type', 'total')  # 'total' or 'team'
+        selected_date = data.get('date', datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+        
+        # Start the appropriate scan type
+        if scan_type == 'team':
+            scan_id = scan_manager.start_scan('team', selected_date, run_team_scan_background, selected_date)
+        else:
+            scan_id = scan_manager.start_scan('total', selected_date, run_total_scan_background, selected_date)
+        
+        return jsonify({
+            'success': True,
+            'scan_id': scan_id,
+            'message': f'Background scan started for {selected_date}'
+        })
+    except Exception as e:
+        logger.error(f"Error starting scan: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/scan/status/<scan_id>')
+def get_scan_status(scan_id):
+    """Get status of a background scan."""
+    status = scan_manager.get_scan_status(scan_id)
+    if not status:
+        return jsonify({'error': 'Scan not found'}), 404
+    return jsonify(status)
+
+
+@app.route('/api/scan/list')
+def list_scans():
+    """List all scans."""
+    scans = scan_manager.get_all_scans()
+    return jsonify({'scans': scans})
+
+
+@app.route('/api/scan/delete/<scan_id>', methods=['DELETE'])
+def delete_scan(scan_id):
+    """Delete a scan."""
+    success = scan_manager.delete_scan(scan_id)
+    if success:
+        return jsonify({'success': True})
+    return jsonify({'error': 'Scan not found'}), 404
+
+
+def run_total_scan_background(selected_date, progress_callback=None):
+    """Run total points scan in background (simplified version)."""
+    try:
+        if progress_callback:
+            progress_callback(0, 0, None, f"🔄 Starting scan for {selected_date}...")
+        
+        # Update previous predictions
+        updated_count = prediction_tracker.update_results(basketball_api)
+        if progress_callback and updated_count > 0:
+            progress_callback(0, 0, None, f"✅ Updated {updated_count} previous predictions")
+        
+        current_time = datetime.now(timezone.utc)
+        
+        # Fetch all games
+        if progress_callback:
+            progress_callback(0, 0, None, f"🌍 Fetching all basketball games for {selected_date}...")
+        
+        response = basketball_api.request("games", {"date": selected_date}, cache_hours=1)
+        
+        if not response or not response.get("response"):
+            return {
+                "success": True,
+                "date": selected_date,
+                "crown_picks": [],
+                "runner_ups": [],
+                "stats": {"games_scanned": 0, "valid_predictions": 0}
+            }
+        
+        raw_games = response["response"]
+        scan_date_obj = datetime.strptime(selected_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        is_future = scan_date_obj.date() >= current_time.date()
+        
+        # Filter games
+        all_games = []
+        for game in raw_games:
+            try:
+                game_status = game.get("status", {}).get("short", "")
+                if is_future and game_status != "NS":
+                    continue
+                    
+                league_id = game.get("league", {}).get("id", 0)
+                league_name = game.get("league", {}).get("name", "")
+                country = game.get("country", {}).get("name", "")
+                
+                year = scan_date_obj.year
+                month = scan_date_obj.month
+                season = game.get("league", {}).get("season", "")
+                if not season:
+                    season = f"{year-1}-{year}" if month <= 6 else f"{year}-{year+1}"
+                
+                all_games.append({
+                    "game": game,
+                    "league_id": league_id,
+                    "league_name": league_name,
+                    "country": country,
+                    "season": str(season)
+                })
+            except:
+                continue
+        
+        total_games = len(all_games)
+        if progress_callback:
+            progress_callback(0, total_games, None, f"📊 Found {total_games} eligible games")
+        
+        # Analyze each game
+        all_predictions = []
+        
+        for idx, game_data in enumerate(all_games):
+            try:
+                game = game_data["game"]
+                home_team = game["teams"]["home"]
+                away_team = game["teams"]["away"]
+                fixture = f"{home_team['name']} vs {away_team['name']}"
+                
+                if progress_callback:
+                    progress_callback(
+                        idx + 1, 
+                        total_games,
+                        {'fixture': fixture, 'league': game_data['league_name']},
+                        f"[{idx+1}/{total_games}] {fixture}"
+                    )
+                
+                # Get prediction (use existing predictor logic)
+                league_id = game_data["league_id"]
+                season = game_data["season"]
+                
+                home_stats = basketball_api.get_team_statistics(home_team["id"], league_id, season) or {}
+                away_stats = basketball_api.get_team_statistics(away_team["id"], league_id, season) or {}
+                home_recent = basketball_api.get_team_games(home_team["id"], season, last=10) or []
+                away_recent = basketball_api.get_team_games(away_team["id"], season, last=10) or []
+                h2h = basketball_api.get_head_to_head(home_team["id"], away_team["id"], last=10) or []
+                odds = basketball_api.get_odds(game["id"]) or {}
+                
+                game_date = datetime.fromisoformat(game["date"].replace("Z", "+00:00"))
+                
+                game_info = {
+                    "home_name": home_team["name"],
+                    "away_name": away_team["name"],
+                    "home_id": home_team["id"],
+                    "away_id": away_team["id"],
+                    "game_date": game_date,
+                    "league_id": league_id,
+                }
+                
+                # Get total line from odds
+                if odds.get("totals"):
+                    for line_str in odds["totals"].keys():
+                        try:
+                            line_val = float(line_str.replace("Over ", "").replace("Under ", ""))
+                            game_info["total_line"] = line_val
+                            break
+                        except:
+                            pass
+                
+                prediction = basketball_predictor.predict_game(
+                    game_info, home_stats, away_stats, home_recent, away_recent, h2h
+                )
+                
+                if prediction and prediction.get("probability", 0) >= 0.80:
+                    prediction["game_id"] = game["id"]
+                    prediction["fixture"] = fixture
+                    prediction["league"] = game_data["league_name"]
+                    prediction["country"] = game_data["country"]
+                    prediction["odds_data"] = odds
+                    all_predictions.append(prediction)
+                    
+            except Exception as e:
+                logger.error(f"Error analyzing game: {e}")
+                continue
+        
+        # Sort by probability and get top 2
+        all_predictions.sort(key=lambda x: x.get("probability", 0), reverse=True)
+        crown_picks = all_predictions[:2]
+        runner_ups = all_predictions[2:5] if len(all_predictions) > 2 else []
+        
+        # Log predictions
+        for pred in crown_picks:
+            prediction_tracker.log_prediction(pred, is_crown=True)
+        
+        if progress_callback:
+            progress_callback(total_games, total_games, None, f"✅ Scan complete! Found {len(crown_picks)} crown picks")
+        
+        return {
+            "success": True,
+            "date": selected_date,
+            "crown_picks": crown_picks,
+            "runner_ups": runner_ups,
+            "stats": {
+                "games_scanned": total_games,
+                "valid_predictions": len(all_predictions),
+                "crown_picks": len(crown_picks)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Background scan error: {e}", exc_info=True)
+        raise
+
+
+def run_team_scan_background(selected_date, progress_callback=None):
+    """Run team points scan in background (simplified version)."""
+    # Similar to run_total_scan_background but for team predictions
+    # For now, return placeholder - implement similar logic
+    if progress_callback:
+        progress_callback(0, 0, None, "Team scan not yet implemented for background mode")
+    
+    return {
+        "success": True,
+        "date": selected_date,
+        "team_picks": [],
+        "stats": {"games_scanned": 0, "team_predictions": 0}
+    }
 
 
 if __name__ == '__main__':

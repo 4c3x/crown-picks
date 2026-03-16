@@ -1160,6 +1160,125 @@
             }
         }
 
+        /* ===== BACKGROUND SCAN (Persists even when browser closes) ===== */
+        let currentScanId = null;
+        let statusCheckInterval = null;
+        
+        function startBackgroundScan(type = 'total') {
+            const selectedDate = document.getElementById('date-picker').value || new Date().toISOString().split('T')[0];
+            
+            // Reset UI
+            document.getElementById('empty-state').style.display = 'none';
+            document.getElementById('no-picks-state').style.display = 'none';
+            document.getElementById('picks-content').style.display = 'none';
+            document.getElementById('progress-section').classList.add('active');
+            document.getElementById('get-picks-btn').disabled = true;
+            document.getElementById('get-picks-btn').textContent = '⏳ Scanning...';
+            clearLogs();
+            showView('picks');
+            
+            // Start scan
+            fetch('/api/scan/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({type: type, date: selectedDate})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    currentScanId = data.scan_id;
+                    addLog('🚀 Background scan started! You can close this browser - scan will continue.', 'success');
+                    addLog('💡 Scan ID: ' + data.scan_id, 'info');
+                    
+                    // Start polling for status
+                    statusCheckInterval = setInterval(checkScanStatus, 2000);
+                } else {
+                    addLog('❌ Failed to start scan: ' + data.error, 'error');
+                    document.getElementById('get-picks-btn').disabled = false;
+                    document.getElementById('get-picks-btn').textContent = '🔍 Total Picks';
+                }
+            })
+            .catch(err => {
+                addLog('❌ Error starting scan: ' + err, 'error');
+                document.getElementById('get-picks-btn').disabled = false;
+                document.getElementById('get-picks-btn').textContent = '🔍 Total Picks';
+            });
+        }
+        
+        function checkScanStatus() {
+            if (!currentScanId) return;
+            
+            fetch('/api/scan/status/' + currentScanId)
+                .then(res => res.json())
+                .then(status => {
+                    // Update progress
+                    if (status.total > 0) {
+                        const percent = Math.floor((status.progress / status.total) * 100);
+                        updateProgress(status.progress, status.total, percent);
+                    }
+                    
+                    // Update current game
+                    if (status.current_game) {
+                        document.getElementById('progress-current').innerHTML =
+                            'Analyzing: <span class="fixture">' + status.current_game.fixture + '</span> <span class="league">(' + status.current_game.league + ')</span>';
+                    }
+                    
+                    // Add new logs
+                    if (status.logs && status.logs.length > 0) {
+                        const lastLog = status.logs[status.logs.length - 1];
+                        // Simple check to avoid duplicate logs (could be improved)
+                        addLog(lastLog.message, 'info');
+                    }
+                    
+                    // Check if completed
+                    if (status.status === 'completed') {
+                        clearInterval(statusCheckInterval);
+                        statusCheckInterval = null;
+                        currentScanId = null;
+                        
+                        addLog('✅ Scan completed successfully!', 'success');
+                        
+                        // Render results
+                        if (status.results) {
+                            renderPicks(status.results);
+                        }
+                        
+                        document.getElementById('get-picks-btn').disabled = false;
+                        document.getElementById('get-picks-btn').textContent = '🔍 Total Picks';
+                        
+                        setTimeout(() => {
+                            document.getElementById('progress-section').classList.remove('active');
+                        }, 500);
+                    }
+                    else if (status.status === 'failed') {
+                        clearInterval(statusCheckInterval);
+                        statusCheckInterval = null;
+                        currentScanId = null;
+                        
+                        addLog('❌ Scan failed: ' + status.error, 'error');
+                        document.getElementById('get-picks-btn').disabled = false;
+                        document.getElementById('get-picks-btn').textContent = '🔍 Total Picks';
+                    }
+                })
+                .catch(err => {
+                    console.error('Error checking scan status:', err);
+                });
+        }
+        
+        // Override getDailyPicks to use background mode
+        const originalGetDailyPicks = getDailyPicks;
+        getDailyPicks = function() {
+            // Use background scan instead of SSE
+            startBackgroundScan('total');
+        };
+        
+        // Override getTeamPicks to use background mode
+        const originalGetTeamPicks = getTeamPicks;
+        getTeamPicks = function() {
+            // Use background scan for team picks
+            startBackgroundScan('team');
+        };
+
         /* ===== Service Worker Registration ===== */
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', function() {

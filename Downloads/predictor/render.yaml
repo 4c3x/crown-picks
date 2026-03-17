@@ -3,7 +3,7 @@ services:
     name: crown-picks
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app_simple:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 300 --worker-class gevent app:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0

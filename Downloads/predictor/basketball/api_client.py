@@ -57,7 +57,7 @@ class BasketballAPIClient:
         self._requests_this_minute = 0
         
     def _rate_limit(self):
-        """Enforce rate limiting."""
+        """Enforce rate limiting (small sleeps to avoid worker kills)."""
         current_time = time.time()
         
         if current_time - self._last_request_time > 60:
@@ -66,8 +66,11 @@ class BasketballAPIClient:
         if self._requests_this_minute >= BASKETBALL_API_RATE_LIMIT:
             sleep_time = 60 - (current_time - self._last_request_time)
             if sleep_time > 0:
-                logger.info(f"Rate limit reached. Sleeping {sleep_time:.1f}s...")
-                time.sleep(sleep_time)
+                logger.info(f"Rate limit reached. Waiting {sleep_time:.1f}s...")
+                # Sleep in 2-second chunks so gunicorn worker stays alive
+                while sleep_time > 0:
+                    time.sleep(min(2, sleep_time))
+                    sleep_time -= 2
             self._requests_this_minute = 0
             
         self._last_request_time = current_time

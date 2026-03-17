@@ -2,7 +2,6 @@ services:
   - type: web
     name: crown-picks
     env: python
-    rootDir: Downloads/predictor
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --keep-alive 5 app:app
     envVars:

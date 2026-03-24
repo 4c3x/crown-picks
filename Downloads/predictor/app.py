@@ -15,7 +15,8 @@ from pathlib import Path
 import sys
 import logging
 import json
-import csv
+import os
+import shutil
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -362,45 +363,30 @@ def get_daily_picks_stream():
 def get_results():
     """Get all prediction results with statistics."""
     try:
-        import csv
-        from pathlib import Path
-        
-        csv_path = Path('output/basketball_predictions.csv')
-        
-        if not csv_path.exists():
-            return jsonify({
-                "overall": {"total": 0, "wins": 0, "losses": 0, "accuracy": 0, "pending": 0},
-                "crown_stats": {"total": 0, "wins": 0, "losses": 0, "accuracy": 0},
-                "all_predictions": []
-            })
-        
-        # Read CSV
-        with open(csv_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
+        all_preds = prediction_tracker.get_all()
         
         # Filter to TOTAL POINTS predictions
-        total_preds = [r for r in rows if 'TOTAL POINTS' in r.get('market', '')]
+        total_preds = [r for r in all_preds if 'TOTAL POINTS' in r.get('market', '')]
         completed = [r for r in total_preds if r.get('result')]
         pending = [r for r in total_preds if not r.get('result')]
         
         # Crown picks stats
         crown_preds = [r for r in completed if r.get('is_crown', '').lower() == 'true']
-        crown_wins = sum(1 for r in crown_preds if 'WIN' in r['result'])
+        crown_wins = sum(1 for r in crown_preds if r['result'] == 'WIN')
         
         # Calculate overall stats
-        wins = sum(1 for r in completed if 'WIN' in r['result'])
+        wins = sum(1 for r in completed if r['result'] == 'WIN')
         losses = len(completed) - wins
         accuracy = (wins / len(completed) * 100) if completed else 0
         
         crown_accuracy = (crown_wins / len(crown_preds) * 100) if crown_preds else 0
         
         # By prediction type
-        over_preds = [r for r in completed if r['prediction'] == 'OVER']
-        under_preds = [r for r in completed if r['prediction'] == 'UNDER']
+        over_preds = [r for r in completed if r.get('prediction') == 'OVER']
+        under_preds = [r for r in completed if r.get('prediction') == 'UNDER']
         
-        over_wins = sum(1 for r in over_preds if 'WIN' in r['result'])
-        under_wins = sum(1 for r in under_preds if 'WIN' in r['result'])
+        over_wins = sum(1 for r in over_preds if r['result'] == 'WIN')
+        under_wins = sum(1 for r in under_preds if r['result'] == 'WIN')
         
         # All predictions with full details
         all_predictions = []
@@ -421,7 +407,6 @@ def get_results():
                 'is_crown': r.get('is_crown', 'False').lower() == 'true'
             })
         
-        # Reverse so newest first
         all_predictions.reverse()
         
         return jsonify({
@@ -483,28 +468,59 @@ def update_results():
 # NEW MARKET: TEAM POINTS (Home/Away Over/Under)
 # ============================================================
 
-TEAM_PREDICTIONS_CSV = Path(__file__).parent / "output" / "team_predictions.csv"
+TEAM_PREDICTIONS_JSON = Path(__file__).parent / "output" / "team_predictions.json"
 
-def ensure_team_csv():
-    """Ensure team predictions CSV exists with headers."""
-    if not TEAM_PREDICTIONS_CSV.exists():
-        TEAM_PREDICTIONS_CSV.parent.mkdir(parents=True, exist_ok=True)
-        with open(TEAM_PREDICTIONS_CSV, 'w', newline='', encoding='utf-8') as f:
-            f.write("prediction_date,game_date,game_id,fixture,team_name,team_type,market,prediction,line,expected,our_probability,confidence,confidence_tier,is_crown,final_score,result,margin,updated_date,bookmaker_odds,bookmaker\n")
+def _load_team_predictions():
+    """Load team predictions from JSON."""
+    try:
+        if TEAM_PREDICTIONS_JSON.exists():
+            with open(TEAM_PREDICTIONS_JSON, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        pass
+    
+    # Try migrate from CSV
+    csv_path = TEAM_PREDICTIONS_JSON.with_suffix('.csv')
+    if csv_path.exists():
+        import csv
+        preds = []
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Normalize old result formats
+                    r = row.get('result', '')
+                    if 'WIN' in r:
+                        row['result'] = 'WIN'
+                    elif 'LOSS' in r:
+                        row['result'] = 'LOSS'
+                    preds.append(dict(row))
+            _save_team_predictions(preds)
+            logger.info(f"Migrated {len(preds)} team predictions from CSV to JSON")
+            return preds
+        except Exception as e:
+            logger.warning(f"CSV migration failed: {e}")
+    
+    return []
+
+def _save_team_predictions(predictions):
+    """Atomic write team predictions to JSON."""
+    TEAM_PREDICTIONS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = TEAM_PREDICTIONS_JSON.with_suffix('.tmp')
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(predictions, f, indent=2, default=str)
+    if os.name == 'nt' and TEAM_PREDICTIONS_JSON.exists():
+        TEAM_PREDICTIONS_JSON.unlink()
+    shutil.move(str(tmp_path), str(TEAM_PREDICTIONS_JSON))
 
 def log_team_prediction(pred_data):
-    """Log a team prediction to CSV with validation."""
-    ensure_team_csv()
-    
-    # Validate and normalize data
+    """Log a team prediction to JSON with validation."""
     confidence = pred_data.get('confidence', '')
     confidence_tier = pred_data.get('confidence_tier', '')
     
-    # Skip corrupted entries
     if 'SKIP' in str(confidence_tier):
         return
     
-    # Normalize confidence to HIGH/MEDIUM/LOW if it's a number
     if isinstance(confidence, (int, float)):
         if confidence >= 85:
             confidence = 'HIGH'
@@ -513,117 +529,93 @@ def log_team_prediction(pred_data):
         else:
             confidence = 'LOW'
     
-    # Normalize market to "Team Points"
-    market = "Team Points"
-    
-    with open(TEAM_PREDICTIONS_CSV, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            pred_data.get('prediction_date', ''),
-            pred_data.get('game_date', ''),
-            pred_data.get('game_id', ''),
-            pred_data.get('fixture', ''),
-            pred_data.get('team_name', ''),
-            pred_data.get('team_type', ''),
-            market,
-            pred_data.get('prediction', ''),
-            pred_data.get('line', ''),
-            pred_data.get('expected', ''),
-            pred_data.get('our_probability', ''),
-            confidence,
-            pred_data.get('confidence_tier', 'MEDIUM'),
-            pred_data.get('is_crown', False),
-            '',  # final_score
-            '',  # result
-            '',  # margin
-            '',  # updated_date
-            pred_data.get('bookmaker_odds', ''),  # bookmaker_odds
-            pred_data.get('bookmaker', '')  # bookmaker
-        ])
+    preds = _load_team_predictions()
+    preds.append({
+        'prediction_date': pred_data.get('prediction_date', ''),
+        'game_date': pred_data.get('game_date', ''),
+        'game_id': str(pred_data.get('game_id', '')),
+        'fixture': pred_data.get('fixture', ''),
+        'team_name': pred_data.get('team_name', ''),
+        'team_type': pred_data.get('team_type', ''),
+        'market': 'Team Points',
+        'prediction': pred_data.get('prediction', ''),
+        'line': pred_data.get('line', ''),
+        'expected': pred_data.get('expected', ''),
+        'our_probability': pred_data.get('our_probability', ''),
+        'confidence': confidence,
+        'confidence_tier': pred_data.get('confidence_tier', 'MEDIUM'),
+        'is_crown': pred_data.get('is_crown', False),
+        'final_score': '',
+        'result': '',
+        'margin': '',
+        'updated_date': '',
+        'bookmaker_odds': pred_data.get('bookmaker_odds', ''),
+        'bookmaker': pred_data.get('bookmaker', '')
+    })
+    _save_team_predictions(preds)
 
 def update_team_predictions_results():
     """Update team prediction results from completed games."""
-    if not TEAM_PREDICTIONS_CSV.exists():
+    preds = _load_team_predictions()
+    if not preds:
         return 0
     
     updated = 0
-    rows = []
     
-    with open(TEAM_PREDICTIONS_CSV, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # Skip if already has result (check both formats)
-            result = row.get('result', '')
-            if result and ('WIN' in result or 'LOSS' in result):
-                rows.append(row)
+    for pred in preds:
+        result = pred.get('result', '')
+        if result and result in ('WIN', 'LOSS'):
+            continue
+        
+        try:
+            game_id = pred.get('game_id', '')
+            if not game_id or game_id in ['RECOVERED', 'PENDING', '']:
                 continue
             
-            # Try to get game result
-            try:
-                game_id = row.get('game_id', '')
-                # Skip RECOVERED or PENDING entries - they're already complete or don't have valid IDs
-                if not game_id or game_id in ['RECOVERED', 'PENDING', '']:
-                    rows.append(row)
-                    continue
-                
-                # Fetch game data - BYPASS CACHE to get fresh status
-                response = basketball_api.request("games", {"id": game_id}, cache_hours=0)
-                if not response or not response.get("response"):
-                    rows.append(row)
-                    continue
-                
-                game = response["response"][0]
-                status = game.get("status", {}).get("short", "")
-                
-                if status not in ["FT", "AOT"]:  # Not finished
-                    rows.append(row)
-                    continue
-                
-                scores = game.get("scores", {})
-                home_score = scores.get("home", {}).get("total")
-                away_score = scores.get("away", {}).get("total")
-                
-                if home_score is None or away_score is None:
-                    rows.append(row)
-                    continue
-                
-                # Determine which score to use
-                team_type = row.get('team_type', '')
-                if team_type == 'HOME':
-                    final_score = float(home_score)
-                else:
-                    final_score = float(away_score)
-                
-                line = float(row.get('line', 0))
-                prediction = row.get('prediction', '')
-                
-                # Calculate result
-                if prediction == 'OVER':
-                    won = final_score > line
-                else:  # UNDER
-                    won = final_score < line
-                
-                margin = final_score - line
-                
-                row['final_score'] = final_score
-                row['result'] = '✅ WIN' if won else '❌ LOSS'
-                row['margin'] = f"{margin:+.1f}"
-                row['updated_date'] = datetime.now(timezone.utc).isoformat()
-                updated += 1
-                
-            except Exception as e:
-                pass
+            response = basketball_api.request("games", {"id": game_id}, cache_hours=0)
+            if not response or not response.get("response"):
+                continue
             
-            rows.append(row)
+            game = response["response"][0]
+            status = game.get("status", {}).get("short", "")
+            
+            if status not in ["FT", "AOT"]:
+                continue
+            
+            scores = game.get("scores", {})
+            home_score = scores.get("home", {}).get("total")
+            away_score = scores.get("away", {}).get("total")
+            
+            if home_score is None or away_score is None:
+                continue
+            
+            team_type = pred.get('team_type', '')
+            if team_type == 'HOME':
+                final_score = float(home_score)
+            else:
+                final_score = float(away_score)
+            
+            line = float(pred.get('line', 0))
+            prediction = pred.get('prediction', '')
+            
+            if prediction == 'OVER':
+                won = final_score > line
+            else:
+                won = final_score < line
+            
+            margin = final_score - line
+            
+            pred['final_score'] = final_score
+            pred['result'] = 'WIN' if won else 'LOSS'
+            pred['margin'] = f"{margin:+.1f}"
+            pred['updated_date'] = datetime.now(timezone.utc).isoformat()
+            updated += 1
+            
+        except Exception:
+            continue
     
-    # Write back - always write to ensure consistent state
-    with open(TEAM_PREDICTIONS_CSV, 'w', newline='', encoding='utf-8') as f:
-        fieldnames = ['prediction_date', 'game_date', 'game_id', 'fixture', 'team_name', 'team_type', 
-                     'market', 'prediction', 'line', 'expected', 'our_probability', 'confidence', 
-                     'confidence_tier', 'is_crown', 'final_score', 'result', 'margin', 'updated_date']
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    if updated > 0:
+        _save_team_predictions(preds)
     
     return updated
 
@@ -924,35 +916,31 @@ def get_team_picks_stream():
 
 def get_team_prediction_stats():
     """Get accuracy stats for team predictions."""
-    if not TEAM_PREDICTIONS_CSV.exists():
-        return {"total": 0, "wins": 0, "losses": 0, "accuracy": 0}
-    
+    preds = _load_team_predictions()
     stats = {"total": 0, "wins": 0, "losses": 0, "pending": 0, "home_wins": 0, "home_total": 0, "away_wins": 0, "away_total": 0}
     
-    with open(TEAM_PREDICTIONS_CSV, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            result = row.get('result', '')
-            team_type = row.get('team_type', '')
-            
-            if result == '✅ WIN':
-                stats["wins"] += 1
-                stats["total"] += 1
-                if team_type == 'HOME':
-                    stats["home_wins"] += 1
-                    stats["home_total"] += 1
-                else:
-                    stats["away_wins"] += 1
-                    stats["away_total"] += 1
-            elif result == '❌ LOSS':
-                stats["losses"] += 1
-                stats["total"] += 1
-                if team_type == 'HOME':
-                    stats["home_total"] += 1
-                else:
-                    stats["away_total"] += 1
+    for p in preds:
+        result = p.get('result', '')
+        team_type = p.get('team_type', '')
+        
+        if result == 'WIN':
+            stats["wins"] += 1
+            stats["total"] += 1
+            if team_type == 'HOME':
+                stats["home_wins"] += 1
+                stats["home_total"] += 1
             else:
-                stats["pending"] += 1
+                stats["away_wins"] += 1
+                stats["away_total"] += 1
+        elif result == 'LOSS':
+            stats["losses"] += 1
+            stats["total"] += 1
+            if team_type == 'HOME':
+                stats["home_total"] += 1
+            else:
+                stats["away_total"] += 1
+        else:
+            stats["pending"] += 1
     
     stats["accuracy"] = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
     stats["home_accuracy"] = (stats["home_wins"] / stats["home_total"] * 100) if stats["home_total"] > 0 else 0
@@ -966,19 +954,12 @@ def get_team_results():
     """Get team prediction results and stats."""
     try:
         stats = get_team_prediction_stats()
-        
-        predictions = []
-        if TEAM_PREDICTIONS_CSV.exists():
-            with open(TEAM_PREDICTIONS_CSV, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    predictions.append(row)
-        
+        predictions = _load_team_predictions()
         predictions.reverse()  # Newest first
         
         return jsonify({
             "stats": stats,
-            "predictions": predictions[:50]  # Last 50
+            "predictions": predictions[:50]
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
